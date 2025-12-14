@@ -67,7 +67,11 @@ sourceSets.main.resources { srcDir 'src/generated/resources' }
 
 dependencies {
     minecraft 'net.minecraftforge:forge:1.19.2-43.2.14'
+    implementation 'org.yaml:snakeyaml:2.0'
+    jarJar(group: 'org.yaml', name: 'snakeyaml', version: '[2.0,3.0)')
 }
+
+jarJar.enable()
 
 jar {
     manifest {

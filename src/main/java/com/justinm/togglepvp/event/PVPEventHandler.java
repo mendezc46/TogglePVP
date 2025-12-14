@@ -2,6 +2,7 @@ package com.justinm.togglepvp.event;
 
 import com.justinm.togglepvp.TogglePVPMod;
 import com.justinm.togglepvp.handler.PVPToggleHandler;
+import com.justinm.togglepvp.handler.PVPStatsManager;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import net.minecraft.commands.CommandSourceStack;
@@ -14,6 +15,7 @@ import net.minecraftforge.eventbus.api.EventPriority;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.event.entity.living.LivingAttackEvent;
+import net.minecraftforge.event.entity.living.LivingDeathEvent;
 import net.minecraftforge.event.server.ServerStartingEvent;
 import net.minecraftforge.event.server.ServerStoppingEvent;
 import net.minecraftforge.event.TickEvent;
@@ -25,8 +27,14 @@ public class PVPEventHandler {
 
     @SubscribeEvent
     public static void onServerStarting(ServerStartingEvent event) {
+        // Resetear el flag de servidor cerrando al iniciar
+        PVPToggleHandler.setServerShuttingDown(false);
+        
+        PVPStatsManager.loadStats();
+        
         CommandDispatcher<CommandSourceStack> dispatcher = event.getServer().getCommands().getDispatcher();
 
+        // Comando /pvp
         dispatcher.register(Commands.literal("pvp")
                 .then(Commands.argument("action", StringArgumentType.word())
                         .suggests((context, builder) -> {
@@ -49,8 +57,35 @@ public class PVPEventHandler {
                                 return 0;
                             }
 
+                            // Verificar cooldown
+                            if (PVPToggleHandler.hasCooldown(player.getUUID())) {
+                                player.displayClientMessage(
+                                        Component.literal("§cEspera antes de cambiar PVP"),
+                                        false
+                                );
+                                return 0;
+                            }
+
+                            // Verificar modo global
+                            if (!PVPToggleHandler.canTogglePVP(player.getUUID())) {
+                                String mode = PVPToggleHandler.getGlobalPVPMode();
+                                if (mode.equals("locked-on")) {
+                                    player.displayClientMessage(
+                                            Component.literal("§cPVP está forzado a §2ON§c por el admin"),
+                                            false
+                                    );
+                                } else {
+                                    player.displayClientMessage(
+                                            Component.literal("§cPVP está forzado a §4OFF§c por el admin"),
+                                            false
+                                    );
+                                }
+                                return 0;
+                            }
+
                             if ("on".equalsIgnoreCase(action)) {
                                 PVPToggleHandler.setPVPStatus(player.getUUID(), true);
+                                PVPToggleHandler.setCooldown(player.getUUID());
                                 player.displayClientMessage(
                                         Component.literal("§6PVP §ahabilitado§r").withStyle(style -> style),
                                         false
@@ -59,6 +94,7 @@ public class PVPEventHandler {
                                 return 1;
                             } else if ("off".equalsIgnoreCase(action)) {
                                 PVPToggleHandler.setPVPStatus(player.getUUID(), false);
+                                PVPToggleHandler.setCooldown(player.getUUID());
                                 player.displayClientMessage(
                                         Component.literal("§6PVP §cdeshabilitado§r").withStyle(style -> style),
                                         false
@@ -77,6 +113,80 @@ public class PVPEventHandler {
                 .executes(context -> {
                     context.getSource().sendFailure(Component.literal("§cDebes especificar 'on' u 'off'"));
                     return 0;
+                })
+        );
+
+        // Comando /pvpall (solo OPs)
+        dispatcher.register(Commands.literal("pvpall")
+                .requires(source -> source.hasPermission(4)) // Requiere OP
+                .then(Commands.argument("mode", StringArgumentType.word())
+                        .suggests((context, builder) -> {
+                            builder.suggest("free");
+                            builder.suggest("locked-on");
+                            builder.suggest("locked-off");
+                            return builder.buildFuture();
+                        })
+                        .executes(context -> {
+                            CommandSourceStack source = context.getSource();
+                            String mode = StringArgumentType.getString(context, "mode");
+
+                            if (mode.equalsIgnoreCase("free") || mode.equalsIgnoreCase("locked-on") || mode.equalsIgnoreCase("locked-off")) {
+                                PVPToggleHandler.setGlobalPVPMode(mode.toLowerCase());
+                                
+                                final String mensaje;
+                                final boolean pvpState;
+                                final boolean clearCombat;
+                                
+                                if (mode.equalsIgnoreCase("free")) {
+                                    mensaje = "PVP en modo §6libre";
+                                    pvpState = false; // Default OFF en modo libre
+                                    clearCombat = false;
+                                } else if (mode.equalsIgnoreCase("locked-on")) {
+                                    mensaje = "PVP forzado a §2ON";
+                                    pvpState = true;
+                                    clearCombat = false;
+                                } else {
+                                    mensaje = "PVP forzado a §4OFF";
+                                    pvpState = false;
+                                    clearCombat = true; // Sacar de combate a todos
+                                }
+
+                                MinecraftServer server = source.getServer();
+                                // Actualizar el estado de TODOS los jugadores conectados
+                                server.getPlayerList().getPlayers().forEach(p -> {
+                                    PVPToggleHandler.setPVPStatus(p.getUUID(), pvpState);
+                                    if (clearCombat) {
+                                        PVPToggleHandler.exitCombat(p.getUUID());
+                                    }
+                                    p.displayClientMessage(Component.literal("§6[ADMIN] " + mensaje), false);
+                                });
+                                return 1;
+                            } else {
+                                source.sendFailure(Component.literal("§cModos válidos: free, locked-on, locked-off"));
+                                return 0;
+                            }
+                        })
+                )
+                .executes(context -> {
+                    context.getSource().sendFailure(Component.literal("§cUso: /pvpall [free|locked-on|locked-off]"));
+                    return 0;
+                })
+        );
+
+        // Comando /pvpstats
+        dispatcher.register(Commands.literal("pvpstats")
+                .executes(context -> {
+                    CommandSourceStack source = context.getSource();
+                    ServerPlayer player = source.getPlayerOrException();
+
+                    int kills = PVPStatsManager.getKills(player.getUUID());
+                    int deaths = PVPStatsManager.getDeaths(player.getUUID());
+
+                    player.displayClientMessage(
+                            Component.literal("§6=== Estadísticas PVP ===\n§aKills: " + kills + "\n§cDeaths: " + deaths),
+                            false
+                    );
+                    return 1;
                 })
         );
     }
@@ -139,17 +249,41 @@ public class PVPEventHandler {
     }
 
     @SubscribeEvent
+    public static void onPlayerDeath(LivingDeathEvent event) {
+        if (!(event.getEntity() instanceof ServerPlayer victim)) {
+            return;
+        }
+
+        DamageSource source = event.getSource();
+        if (source.getEntity() instanceof ServerPlayer attacker) {
+            // Guardar nombres de jugadores
+            PVPStatsManager.setPlayerName(attacker.getUUID(), attacker.getName().getString());
+            PVPStatsManager.setPlayerName(victim.getUUID(), victim.getName().getString());
+            
+            // Registrar kill al atacante
+            PVPStatsManager.addKill(attacker.getUUID());
+            PVPStatsManager.addDeath(victim.getUUID());
+        }
+    }
+
+    @SubscribeEvent
     public static void onPlayerLogin(PlayerEvent.PlayerLoggedInEvent event) {
         if (event.getEntity() instanceof ServerPlayer player) {
-            // Resetear el flag de servidor cerrando
-            PVPToggleHandler.setServerShuttingDown(false);
-
-            // Establecer PVP OFF por defecto al entrar al servidor
-            PVPToggleHandler.setPVPStatus(player.getUUID(), false);
-            player.displayClientMessage(
-                    Component.literal("§6PVP deshabilitado por defecto. Usa §e/pvp on §6para activarlo"),
-                    false
-            );
+            // Establecer PVP según el modo global
+            String globalMode = PVPToggleHandler.getGlobalPVPMode();
+            boolean pvpStatus = false; // Default OFF
+            String mensaje = "§6PVP deshabilitado por defecto. Usa §e/pvp on §6para activarlo";
+            
+            if (globalMode.equals("locked-on")) {
+                pvpStatus = true;
+                mensaje = "§6PVP está forzado a §2ON §6por el admin";
+            } else if (globalMode.equals("locked-off")) {
+                pvpStatus = false;
+                mensaje = "§6PVP está forzado a §4OFF §6por el admin";
+            }
+            
+            PVPToggleHandler.setPVPStatus(player.getUUID(), pvpStatus);
+            player.displayClientMessage(Component.literal(mensaje), false);
         }
     }
 
