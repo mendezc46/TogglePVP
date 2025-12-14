@@ -1,0 +1,27 @@
+modLoader="javafml"
+loaderVersion="43"
+license="MIT"
+
+[[mods]]
+modId="togglepvp"
+version="1.0.0"
+displayName="Toggle PVP"
+description='''
+A server-side mod that allows players to toggle their PVP status with /pvp on and /pvp off commands
+'''
+credits="Justin Martinez"
+authors="Justin Martinez"
+
+[[dependencies.togglepvp]]
+    modId="forge"
+    mandatory=true
+    versionRange="[43,)"
+    ordering="NONE"
+    side="SERVER"
+
+[[dependencies.togglepvp]]
+    modId="minecraft"
+    mandatory=true
+    versionRange="[1.19.2]"
+    ordering="NONE"
+    side="SERVER"

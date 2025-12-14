@@ -1,0 +1,3 @@
+togglepvp.pvp.enabled=PVP habilitado
+togglepvp.pvp.disabled=PVP deshabilitado
+togglepvp.pvp.usage=Uso: /pvp [on|off]
