@@ -16,14 +16,60 @@ import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.event.entity.living.LivingAttackEvent;
 import net.minecraftforge.event.entity.living.LivingDeathEvent;
+import net.minecraftforge.event.entity.living.LivingHurtEvent;
 import net.minecraftforge.event.server.ServerStartingEvent;
 import net.minecraftforge.event.server.ServerStoppingEvent;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
+import net.minecraftforge.event.entity.player.PlayerInteractEvent;
+import net.minecraftforge.event.entity.EntityJoinLevelEvent;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LightningBolt;
+import net.minecraft.world.entity.projectile.Projectile;
+import net.minecraft.world.entity.AreaEffectCloud;
+import net.minecraft.world.entity.Mob;
+import net.minecraft.world.entity.OwnableEntity;
+import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.nbt.CompoundTag;
+import java.util.UUID;
 
 @Mod.EventBusSubscriber(modid = "togglepvp", bus = Mod.EventBusSubscriber.Bus.FORGE)
 public class PVPEventHandler {
+
+    @SubscribeEvent
+    public static void onEntityJoinLevel(EntityJoinLevelEvent event) {
+        Entity entity = event.getEntity();
+        
+        // NUNCA rastrear mobs, items, o jugadores
+        if (entity instanceof Mob || entity instanceof ItemEntity || entity instanceof ServerPlayer) {
+            return;
+        }
+        
+        // Si la entidad ya tiene un dueño natural (ej: proyectil de un mob), no sobrescribir
+        if (entity instanceof OwnableEntity ownable && ownable.getOwner() != null) {
+            return;
+        }
+        
+        // Rastrear SOLO entidades que pueden hacer daño (optimización)
+        // Rayos, proyectiles, nubes de efecto de área, etc.
+        boolean isDamageEntity = entity instanceof LightningBolt 
+                              || entity instanceof Projectile
+                              || entity instanceof AreaEffectCloud
+                              || entity.getType().toString().contains("spell")
+                              || entity.getType().toString().contains("magic");
+        
+        if (!event.getLevel().isClientSide && isDamageEntity && event.getLevel().getServer() != null) {
+            // Buscar CUALQUIER jugador que acaba de usar habilidad (sin límite de distancia)
+            // Esto es necesario para hechizos a distancia como Chain Lightning
+            for (ServerPlayer player : event.getLevel().getServer().getPlayerList().getPlayers()) {
+                if (PVPToggleHandler.isRecentAttacker(player.getUUID())) {
+                    PVPToggleHandler.trackEntity(entity, player.getUUID());
+                    break; // Solo atribuir al primer atacante reciente encontrado
+                }
+            }
+        }
+    }
 
     @SubscribeEvent
     public static void onServerStarting(ServerStartingEvent event) {
@@ -190,6 +236,23 @@ public class PVPEventHandler {
                 })
         );
     }
+    @SubscribeEvent
+    public static void onPlayerRightClick(PlayerInteractEvent.RightClickItem event) {
+        // Cuando un jugador usa click derecho con un item (posible hechizo/habilidad)
+        if (event.getEntity() instanceof ServerPlayer player) {
+            // Marcar como atacante reciente para atribuir hechizos posteriores
+            PVPToggleHandler.markPlayerAttacking(player.getUUID());
+        }
+    }
+
+    @SubscribeEvent
+    public static void onPlayerRightClickBlock(PlayerInteractEvent.RightClickBlock event) {
+        // Cuando un jugador usa click derecho en un bloque (posible hechizo al suelo)
+        if (event.getEntity() instanceof ServerPlayer player) {
+            // Marcar como atacante reciente para atribuir hechizos posteriores
+            PVPToggleHandler.markPlayerAttacking(player.getUUID());
+        }
+    }
 
     @SubscribeEvent(priority = EventPriority.HIGHEST)
     public static void onPlayerAttack(LivingAttackEvent event) {
@@ -203,6 +266,10 @@ public class PVPEventHandler {
 
         // Si el daño viene de otro jugador
         if (source.getEntity() instanceof ServerPlayer attacker) {
+            // Marcar que este jugador está atacando A OTRO JUGADOR (para rastrear hechizos posteriores)
+            // Solo marcamos en PVP, no cuando atacan mobs
+            PVPToggleHandler.markPlayerAttacking(attacker.getUUID());
+            
             // Si el atacante no tiene PVP activado, cancela el daño
             if (!PVPToggleHandler.isPVPEnabled(attacker.getUUID())) {
                 event.setCanceled(true);
@@ -220,6 +287,80 @@ public class PVPEventHandler {
                         Component.literal("§c" + victim.getName().getString() + " tiene PVP deshabilitado"),
                         true
                 );
+                return;
+            }
+
+            // Solo si el ataque es válido (ambos tienen PVP ON), entran en combate
+            PVPToggleHandler.enterCombat(attacker.getUUID());
+            PVPToggleHandler.enterCombat(victim.getUUID());
+        }
+    }
+
+    @SubscribeEvent(priority = EventPriority.HIGHEST)
+    public static void onPlayerHurt(LivingHurtEvent event) {
+        // Solo procesamos si el que recibe daño es un jugador
+        if (!(event.getEntity() instanceof ServerPlayer victim)) {
+            return;
+        }
+
+        DamageSource source = event.getSource();
+        ServerPlayer attacker = null;
+
+        // Caso 1: Daño directo de un jugador
+        if (source.getEntity() instanceof ServerPlayer) {
+            attacker = (ServerPlayer) source.getEntity();
+        }
+        // Caso 2: Daño indirecto (flechas, proyectiles, etc.) de un jugador
+        else if (source.getDirectEntity() instanceof ServerPlayer) {
+            attacker = (ServerPlayer) source.getDirectEntity();
+        }
+        // Caso 3: Verificar si es de un mob/boss primero
+        else if (source.getEntity() instanceof Mob) {
+            // Es de un mob/boss, NO aplicar reglas PVP
+            return;
+        }
+        // Caso 4: Si la entidad tiene dueño natural (mob), NO aplicar PVP
+        else if (source.getEntity() instanceof OwnableEntity ownable && ownable.getOwner() instanceof Mob) {
+            return;
+        }
+        // Caso 5: Daño sin entidad fuente (hechizos que no crean entidad rastreable)
+        // Incluye: lightningBolt, drown, y otros efectos mágicos
+        else if (source.getEntity() == null) {
+            // Buscar jugador que acaba de usar habilidad
+            for (ServerPlayer player : victim.getServer().getPlayerList().getPlayers()) {
+                if (PVPToggleHandler.isRecentAttacker(player.getUUID())) {
+                    attacker = player;
+                    break;
+                }
+            }
+        }
+        // Caso 6: Daño por otras entidades rastreadas
+        else if (source.getEntity() != null) {
+            UUID ownerUUID = PVPToggleHandler.getEntityOwner(source.getEntity());
+            if (ownerUUID != null) {
+                // Buscar el jugador propietario
+                MinecraftServer server = victim.getServer();
+                if (server != null) {
+                    attacker = server.getPlayerList().getPlayer(ownerUUID);
+                }
+            }
+        }
+
+        // Si encontramos un atacante jugador, aplicar las reglas PVP
+        if (attacker != null && !attacker.getUUID().equals(victim.getUUID())) {
+            // Si el atacante no tiene PVP activado, cancela el daño
+            if (!PVPToggleHandler.isPVPEnabled(attacker.getUUID())) {
+                event.setCanceled(true);
+                attacker.displayClientMessage(
+                        Component.literal("§cNo puedes atacar con PVP deshabilitado"),
+                        true
+                );
+                return;
+            }
+
+            // Si la víctima no tiene PVP activado, cancela el daño
+            if (!PVPToggleHandler.isPVPEnabled(victim.getUUID())) {
+                event.setCanceled(true);
                 return;
             }
 
@@ -294,6 +435,12 @@ public class PVPEventHandler {
         }
 
         MinecraftServer server = event.getServer();
+        
+        // Limpiar entidades rastreadas cada 5 segundos (100 ticks)
+        if (server.getTickCount() % 100 == 0) {
+            PVPToggleHandler.cleanupTrackedEntities();
+        }
+        
         for (ServerPlayer player : server.getPlayerList().getPlayers()) {
             if (PVPToggleHandler.isInCombat(player.getUUID())) {
                 long timeRemaining = PVPToggleHandler.getCombatTimeRemaining(player.getUUID());

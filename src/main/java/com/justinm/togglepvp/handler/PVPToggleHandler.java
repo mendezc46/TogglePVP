@@ -5,6 +5,10 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.WeakHashMap;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.MinecraftServer;
 
 public class PVPToggleHandler {
     private static final Map<UUID, Boolean> playerPVPStatus = new HashMap<>();
@@ -15,6 +19,14 @@ public class PVPToggleHandler {
     private static final long COOLDOWN_DURATION = 5000; // 5 segundos cooldown
     private static boolean serverShuttingDown = false;
     private static String globalPVPMode = "free"; // free, locked-on, locked-off
+    
+    // Rastrear entidades creadas por jugadores (rayos, proyectiles, etc.)
+    private static final WeakHashMap<Entity, UUID> entityOwners = new WeakHashMap<>();
+    private static final int MAX_TRACKED_ENTITIES = 500; // Límite de seguridad
+    
+    // Rastrear jugadores que acaban de atacar (para atribuir hechizos)
+    private static final Map<UUID, Long> recentAttackers = new HashMap<>();
+    private static final long ATTACK_ATTRIBUTION_WINDOW = 500; // 0.5 segundos (más corto para evitar falsos positivos)
 
     public static boolean isPVPEnabled(UUID playerUUID) {
         return playerPVPStatus.getOrDefault(playerUUID, false);
@@ -112,5 +124,48 @@ public class PVPToggleHandler {
 
     public static void setCooldown(UUID playerUUID) {
         pvpCooldown.put(playerUUID, System.currentTimeMillis());
+    }
+
+    public static void trackEntity(Entity entity, UUID ownerUUID) {
+        // Limitar tamaño para evitar crecimiento infinito
+        if (entityOwners.size() >= MAX_TRACKED_ENTITIES) {
+            entityOwners.clear(); // Reset de emergencia
+        }
+        entityOwners.put(entity, ownerUUID);
+    }
+
+    public static UUID getEntityOwner(Entity entity) {
+        return entityOwners.get(entity);
+    }
+
+    public static void cleanupTrackedEntities() {
+        // WeakHashMap limpia automáticamente, pero forzamos limpieza manual también
+        entityOwners.entrySet().removeIf(entry -> entry.getKey() == null || !entry.getKey().isAlive());
+        
+        // Limpiar atacantes antiguos
+        long now = System.currentTimeMillis();
+        recentAttackers.entrySet().removeIf(entry -> (now - entry.getValue()) > ATTACK_ATTRIBUTION_WINDOW);
+    }
+    
+    public static void markPlayerAttacking(UUID playerUUID) {
+        recentAttackers.put(playerUUID, System.currentTimeMillis());
+    }
+    
+    public static boolean isRecentAttacker(UUID playerUUID) {
+        Long lastAttack = recentAttackers.get(playerUUID);
+        if (lastAttack == null) return false;
+        return (System.currentTimeMillis() - lastAttack) <= ATTACK_ATTRIBUTION_WINDOW;
+    }
+    
+    public static UUID getRecentAttackerNearby(double x, double y, double z, MinecraftServer server, double maxDist) {
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            if (isRecentAttacker(player.getUUID())) {
+                double dist = player.distanceToSqr(x, y, z);
+                if (dist <= maxDist) {
+                    return player.getUUID();
+                }
+            }
+        }
+        return null;
     }
 }
