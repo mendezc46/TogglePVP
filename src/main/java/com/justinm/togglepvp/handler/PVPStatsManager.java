@@ -11,7 +11,7 @@ import java.util.UUID;
 import java.util.LinkedHashMap;
 import org.yaml.snakeyaml.Yaml;
 import org.yaml.snakeyaml.DumperOptions;
-import net.minecraftforge.fml.loading.FMLPaths;
+import net.neoforged.fml.loading.FMLPaths;
 
 public class PVPStatsManager {
     private static final File statsFile = new File(FMLPaths.GAMEDIR.get().toFile(), "pvptoggle/stats.yaml");

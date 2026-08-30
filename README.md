@@ -1,6 +1,6 @@
 # Toggle PVP
 
-Mod servidor para Minecraft 1.19.2 Forge que permite activar/desactivar PVP.
+Mod de servidor para Minecraft 1.21.1 NeoForge que permite activar/desactivar PVP.
 
 ## Comandos
 

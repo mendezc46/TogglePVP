@@ -10,19 +10,18 @@ import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.damagesource.DamageSource;
-import net.minecraftforge.api.distmarker.Dist;
-import net.minecraftforge.eventbus.api.EventPriority;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.minecraftforge.fml.common.Mod;
-import net.minecraftforge.event.entity.living.LivingAttackEvent;
-import net.minecraftforge.event.entity.living.LivingDeathEvent;
-import net.minecraftforge.event.entity.living.LivingHurtEvent;
-import net.minecraftforge.event.server.ServerStartingEvent;
-import net.minecraftforge.event.server.ServerStoppingEvent;
-import net.minecraftforge.event.TickEvent;
-import net.minecraftforge.event.entity.player.PlayerEvent;
-import net.minecraftforge.event.entity.player.PlayerInteractEvent;
-import net.minecraftforge.event.entity.EntityJoinLevelEvent;
+import net.neoforged.bus.api.EventPriority;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
+import net.neoforged.neoforge.event.entity.living.LivingIncomingDamageEvent;
+import net.neoforged.neoforge.event.server.ServerStartingEvent;
+import net.neoforged.neoforge.event.server.ServerStoppingEvent;
+import net.neoforged.neoforge.event.tick.ServerTickEvent;
+import net.neoforged.neoforge.event.entity.player.PlayerEvent;
+import net.neoforged.neoforge.event.entity.player.PlayerInteractEvent;
+import net.neoforged.neoforge.event.entity.EntityJoinLevelEvent;
+import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LightningBolt;
@@ -34,7 +33,7 @@ import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.nbt.CompoundTag;
 import java.util.UUID;
 
-@Mod.EventBusSubscriber(modid = "togglepvp", bus = Mod.EventBusSubscriber.Bus.FORGE)
+@EventBusSubscriber(modid = TogglePVPMod.MOD_ID)
 public class PVPEventHandler {
 
     @SubscribeEvent
@@ -59,7 +58,7 @@ public class PVPEventHandler {
                               || entity.getType().toString().contains("spell")
                               || entity.getType().toString().contains("magic");
         
-        if (!event.getLevel().isClientSide && isDamageEntity && event.getLevel().getServer() != null) {
+        if (!event.getLevel().isClientSide() && isDamageEntity && event.getLevel().getServer() != null) {
             // Buscar CUALQUIER jugador que acaba de usar habilidad (sin límite de distancia)
             // Esto es necesario para hechizos a distancia como Chain Lightning
             for (ServerPlayer player : event.getLevel().getServer().getPlayerList().getPlayers()) {
@@ -78,7 +77,11 @@ public class PVPEventHandler {
         
         PVPStatsManager.loadStats();
         
-        CommandDispatcher<CommandSourceStack> dispatcher = event.getServer().getCommands().getDispatcher();
+    }
+
+    @SubscribeEvent
+    public static void onRegisterCommands(RegisterCommandsEvent event) {
+        CommandDispatcher<CommandSourceStack> dispatcher = event.getDispatcher();
 
         // Comando /pvp
         dispatcher.register(Commands.literal("pvp")
@@ -255,49 +258,7 @@ public class PVPEventHandler {
     }
 
     @SubscribeEvent(priority = EventPriority.HIGHEST)
-    public static void onPlayerAttack(LivingAttackEvent event) {
-        // Solo procesamos si el que recibe daño es un jugador
-        if (!(event.getEntity() instanceof ServerPlayer victim)) {
-            return;
-        }
-
-        // Obtenemos la fuente del daño
-        DamageSource source = event.getSource();
-
-        // Si el daño viene de otro jugador
-        if (source.getEntity() instanceof ServerPlayer attacker) {
-            // Marcar que este jugador está atacando A OTRO JUGADOR (para rastrear hechizos posteriores)
-            // Solo marcamos en PVP, no cuando atacan mobs
-            PVPToggleHandler.markPlayerAttacking(attacker.getUUID());
-            
-            // Si el atacante no tiene PVP activado, cancela el daño
-            if (!PVPToggleHandler.isPVPEnabled(attacker.getUUID())) {
-                event.setCanceled(true);
-                attacker.displayClientMessage(
-                        Component.literal("§cNo puedes atacar con PVP deshabilitado"),
-                        true
-                );
-                return;
-            }
-
-            // Si la víctima no tiene PVP activado, cancela el daño
-            if (!PVPToggleHandler.isPVPEnabled(victim.getUUID())) {
-                event.setCanceled(true);
-                attacker.displayClientMessage(
-                        Component.literal("§c" + victim.getName().getString() + " tiene PVP deshabilitado"),
-                        true
-                );
-                return;
-            }
-
-            // Solo si el ataque es válido (ambos tienen PVP ON), entran en combate
-            PVPToggleHandler.enterCombat(attacker.getUUID());
-            PVPToggleHandler.enterCombat(victim.getUUID());
-        }
-    }
-
-    @SubscribeEvent(priority = EventPriority.HIGHEST)
-    public static void onPlayerHurt(LivingHurtEvent event) {
+    public static void onPlayerDamage(LivingIncomingDamageEvent event) {
         // Solo procesamos si el que recibe daño es un jugador
         if (!(event.getEntity() instanceof ServerPlayer victim)) {
             return;
@@ -348,6 +309,7 @@ public class PVPEventHandler {
 
         // Si encontramos un atacante jugador, aplicar las reglas PVP
         if (attacker != null && !attacker.getUUID().equals(victim.getUUID())) {
+            PVPToggleHandler.markPlayerAttacking(attacker.getUUID());
             // Si el atacante no tiene PVP activado, cancela el daño
             if (!PVPToggleHandler.isPVPEnabled(attacker.getUUID())) {
                 event.setCanceled(true);
@@ -429,11 +391,7 @@ public class PVPEventHandler {
     }
 
     @SubscribeEvent
-    public static void onServerTick(TickEvent.ServerTickEvent event) {
-        if (event.phase != TickEvent.Phase.END) {
-            return;
-        }
-
+    public static void onServerTick(ServerTickEvent.Post event) {
         MinecraftServer server = event.getServer();
         
         // Limpiar entidades rastreadas cada 5 segundos (100 ticks)
