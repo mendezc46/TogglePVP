@@ -259,34 +259,49 @@ public class PVPEventHandler {
 
     @SubscribeEvent(priority = EventPriority.HIGHEST)
     public static void onPlayerDamage(LivingIncomingDamageEvent event) {
+        // Una criatura cuyo dueño tiene PVP desactivado no puede recibir daño
+        // de otros jugadores ni de criaturas pertenecientes a esos jugadores.
+        if (event.getEntity() instanceof OwnableEntity ownedVictim
+                && ownedVictim.getOwner() instanceof ServerPlayer victimOwner) {
+            ServerPlayer responsiblePlayer = getResponsiblePlayer(event.getSource());
+
+            if (responsiblePlayer != null
+                    && !responsiblePlayer.getUUID().equals(victimOwner.getUUID())
+                    && !PVPToggleHandler.isPVPEnabled(victimOwner.getUUID())) {
+                event.setCanceled(true);
+                responsiblePlayer.displayClientMessage(
+                        Component.literal("§cLa criatura de " + victimOwner.getName().getString()
+                                + " está protegida porque su dueño tiene PVP deshabilitado"),
+                        true
+                );
+                return;
+            }
+        }
+
         // Solo procesamos si el que recibe daño es un jugador
         if (!(event.getEntity() instanceof ServerPlayer victim)) {
             return;
         }
 
         DamageSource source = event.getSource();
-        ServerPlayer attacker = null;
+        // El jugador responsable puede ser el atacante directo o el dueño de
+        // una criatura domesticada. En ambos casos se aplican las mismas reglas.
+        ServerPlayer attacker = getResponsiblePlayer(source);
 
-        // Caso 1: Daño directo de un jugador
-        if (source.getEntity() instanceof ServerPlayer) {
-            attacker = (ServerPlayer) source.getEntity();
-        }
-        // Caso 2: Daño indirecto (flechas, proyectiles, etc.) de un jugador
-        else if (source.getDirectEntity() instanceof ServerPlayer) {
-            attacker = (ServerPlayer) source.getDirectEntity();
-        }
-        // Caso 3: Verificar si es de un mob/boss primero
-        else if (source.getEntity() instanceof Mob) {
+        // Las criaturas salvajes o sin dueño siguen haciendo daño normalmente.
+        if (attacker == null && source.getEntity() instanceof Mob) {
             // Es de un mob/boss, NO aplicar reglas PVP
             return;
         }
-        // Caso 4: Si la entidad tiene dueño natural (mob), NO aplicar PVP
-        else if (source.getEntity() instanceof OwnableEntity ownable && ownable.getOwner() instanceof Mob) {
+        // Si la entidad tiene como dueño natural otro mob, tampoco es PVP.
+        else if (attacker == null
+                && source.getEntity() instanceof OwnableEntity ownable
+                && ownable.getOwner() instanceof Mob) {
             return;
         }
-        // Caso 5: Daño sin entidad fuente (hechizos que no crean entidad rastreable)
+        // Daño sin entidad fuente (hechizos que no crean entidad rastreable).
         // Incluye: lightningBolt, drown, y otros efectos mágicos
-        else if (source.getEntity() == null) {
+        else if (attacker == null && source.getEntity() == null) {
             // Buscar jugador que acaba de usar habilidad
             for (ServerPlayer player : victim.getServer().getPlayerList().getPlayers()) {
                 if (PVPToggleHandler.isRecentAttacker(player.getUUID())) {
@@ -295,8 +310,8 @@ public class PVPEventHandler {
                 }
             }
         }
-        // Caso 6: Daño por otras entidades rastreadas
-        else if (source.getEntity() != null) {
+        // Daño por otras entidades rastreadas.
+        else if (attacker == null && source.getEntity() != null) {
             UUID ownerUUID = PVPToggleHandler.getEntityOwner(source.getEntity());
             if (ownerUUID != null) {
                 // Buscar el jugador propietario
@@ -332,6 +347,21 @@ public class PVPEventHandler {
         }
     }
 
+    private static ServerPlayer getResponsiblePlayer(DamageSource source) {
+        ServerPlayer player = getPlayerOwner(source.getEntity());
+        return player != null ? player : getPlayerOwner(source.getDirectEntity());
+    }
+
+    private static ServerPlayer getPlayerOwner(Entity entity) {
+        if (entity instanceof ServerPlayer player) {
+            return player;
+        }
+        if (entity instanceof OwnableEntity ownable && ownable.getOwner() instanceof ServerPlayer owner) {
+            return owner;
+        }
+        return null;
+    }
+
     @SubscribeEvent
     public static void onServerStopping(ServerStoppingEvent event) {
         // Marcar que el servidor está cerrando
@@ -357,6 +387,8 @@ public class PVPEventHandler {
             return;
         }
 
+        resetPVPAfterDeath(victim);
+
         DamageSource source = event.getSource();
         if (source.getEntity() instanceof ServerPlayer attacker) {
             // Guardar nombres de jugadores
@@ -367,6 +399,32 @@ public class PVPEventHandler {
             PVPStatsManager.addKill(attacker.getUUID());
             PVPStatsManager.addDeath(victim.getUUID());
         }
+    }
+
+    @SubscribeEvent
+    public static void onPlayerRespawn(PlayerEvent.PlayerRespawnEvent event) {
+        if (!(event.getEntity() instanceof ServerPlayer player)) {
+            return;
+        }
+
+        resetPVPAfterDeath(player);
+        if (PVPToggleHandler.getGlobalPVPMode().equals("locked-on")) {
+            player.displayClientMessage(
+                    Component.literal("§6PVP continúa forzado a §2ON §6por el admin"),
+                    false
+            );
+        } else {
+            player.displayClientMessage(
+                    Component.literal("§6Tu combatlog terminó y tu PVP volvió a §cOFF"),
+                    false
+            );
+        }
+    }
+
+    private static void resetPVPAfterDeath(ServerPlayer player) {
+        PVPToggleHandler.exitCombat(player.getUUID());
+        boolean forcedOn = PVPToggleHandler.getGlobalPVPMode().equals("locked-on");
+        PVPToggleHandler.setPVPStatus(player.getUUID(), forcedOn);
     }
 
     @SubscribeEvent
